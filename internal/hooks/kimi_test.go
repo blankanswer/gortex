@@ -18,7 +18,7 @@ func TestRunKimiUserPromptSubmitPlainStdout(t *testing.T) {
 	defer restore()
 
 	out := captureStdout(t, func() {
-		runKimi(kimiPromptPayload(cwd, "fix auth token validation"))
+		runKimi(kimiPromptPayload(cwd, "fix auth token validation"), 0)
 	})
 	if out == "" {
 		t.Fatal("expected Kimi prompt context, got empty output")
@@ -43,7 +43,7 @@ func TestRunKimiUserPromptSubmitContentParts(t *testing.T) {
 	defer restore()
 
 	out := captureStdout(t, func() {
-		runKimi([]byte(`{"hook_event_name":"UserPromptSubmit","cwd":` + strconv.Quote(cwd) + `,"prompt":[{"type":"text","text":"trace auth middleware"},{"type":"image","source":"ignored"}]}`))
+		runKimi([]byte(`{"hook_event_name":"UserPromptSubmit","cwd":`+strconv.Quote(cwd)+`,"prompt":[{"type":"text","text":"trace auth middleware"},{"type":"image","source":"ignored"}]}`), 0)
 	})
 	if !strings.Contains(out, "AuthMiddleware") {
 		t.Fatalf("content-parts prompt did not produce context:\n%s", out)
@@ -74,7 +74,7 @@ func TestRunKimiPreToolUseGortexReadPlainStdout(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := captureStdout(t, func() {
-				runKimi(kimiPreToolPayload(cwd, tt.tool, `{"path":"internal/a.go"}`))
+				runKimi(kimiPreToolPayload(cwd, tt.tool, `{"path":"internal/a.go"}`), 0)
 			})
 			if out == "" {
 				t.Fatal("expected Kimi MCP read PreToolUse guidance, got empty output")
@@ -137,7 +137,128 @@ func TestRunKimiPreToolUseGortexReadSilentShapes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := captureStdout(t, func() {
-				runKimi(kimiPreToolPayload(tt.cwd, tt.tool, tt.input))
+				runKimi(kimiPreToolPayload(tt.cwd, tt.tool, tt.input), 0)
+			})
+			if out != "" {
+				t.Fatalf("expected silent no-op, got %q", out)
+			}
+		})
+	}
+}
+
+func TestRunKimiPostToolUseReadFilePlainStdout(t *testing.T) {
+	cwd := writeGortexProjectMarker(t, t.TempDir())
+	port := stubBridge(t, map[string]int{"internal/a.go": 3}, nil, map[string]int{"internal/a.go": 2})
+
+	out := captureStdout(t, func() {
+		runKimi(kimiPostToolPayload(cwd, "ReadFile", `{"path":"internal/a.go"}`, "package internal\n"), port)
+	})
+	if out == "" {
+		t.Fatal("expected Kimi ReadFile PostToolUse graph context, got empty output")
+	}
+	if !strings.Contains(out, "Graph footprint for internal/a.go") || !strings.Contains(out, "3 indexed symbol(s)") {
+		t.Fatalf("missing file footprint context:\n%s", out)
+	}
+	assertKimiPlainStdout(t, out)
+}
+
+func TestRunKimiPostToolUseGlobPlainStdout(t *testing.T) {
+	cwd := writeGortexProjectMarker(t, t.TempDir())
+	port := stubBridge(t, map[string]int{
+		"src/big.go":   42,
+		"src/small.go": 3,
+	}, nil, nil)
+
+	out := captureStdout(t, func() {
+		runKimi(kimiPostToolPayload(cwd, "Glob", `{"pattern":"*.go"}`, "src/big.go\nsrc/small.go\n"), port)
+	})
+	if out == "" {
+		t.Fatal("expected Kimi Glob PostToolUse graph context, got empty output")
+	}
+	if !strings.Contains(out, "Indexed 2/2 Glob match(es)") || !strings.Contains(out, "src/big.go") {
+		t.Fatalf("missing Glob summary context:\n%s", out)
+	}
+	assertKimiPlainStdout(t, out)
+}
+
+func TestRunKimiPostToolUseGrepContentPlainStdout(t *testing.T) {
+	cwd := writeGortexProjectMarker(t, t.TempDir())
+	port := stubBridge(t, nil, map[string]struct{ ID, Name, Kind string }{
+		"src/a.go:7": {ID: "src/a.go::MyType", Name: "MyType", Kind: "type"},
+	}, nil)
+
+	out := captureStdout(t, func() {
+		runKimi(kimiPostToolPayload(cwd, "Grep", `{"pattern":"MyType","output_mode":"content"}`, "src/a.go:7:type MyType struct{}\n"), port)
+	})
+	if out == "" {
+		t.Fatal("expected Kimi Grep content PostToolUse graph context, got empty output")
+	}
+	if !strings.Contains(out, "Graph context") || !strings.Contains(out, "type MyType") {
+		t.Fatalf("missing Grep enclosing-symbol context:\n%s", out)
+	}
+	assertKimiPlainStdout(t, out)
+}
+
+func TestRunKimiPostToolUseGrepFilesWithMatchesUsesGlobSummary(t *testing.T) {
+	cwd := writeGortexProjectMarker(t, t.TempDir())
+	port := stubBridge(t, map[string]int{"src/a.go": 5}, nil, nil)
+
+	out := captureStdout(t, func() {
+		runKimi(kimiPostToolPayload(cwd, "Grep", `{"pattern":"MyType"}`, "src/a.go\n"), port)
+	})
+	if out == "" {
+		t.Fatal("expected Kimi Grep file-list PostToolUse graph context, got empty output")
+	}
+	if !strings.Contains(out, "Indexed 1/1 Glob match(es)") || !strings.Contains(out, "src/a.go") {
+		t.Fatalf("missing Grep file-list summary context:\n%s", out)
+	}
+	assertKimiPlainStdout(t, out)
+}
+
+func TestRunKimiPostToolUseSilentShapes(t *testing.T) {
+	cwd := writeGortexProjectMarker(t, t.TempDir())
+	port := stubBridge(t, nil, nil, nil)
+	tests := []struct {
+		name   string
+		cwd    string
+		tool   string
+		input  string
+		output string
+	}{
+		{
+			name:   "outside project",
+			cwd:    t.TempDir(),
+			tool:   "ReadFile",
+			input:  `{"path":"internal/a.go"}`,
+			output: "package internal\n",
+		},
+		{
+			name:   "unsupported tool",
+			cwd:    cwd,
+			tool:   "WriteFile",
+			input:  `{"path":"internal/a.go"}`,
+			output: "ok",
+		},
+		{
+			name:   "grep count matches",
+			cwd:    cwd,
+			tool:   "Grep",
+			input:  `{"pattern":"Foo","output_mode":"count_matches"}`,
+			output: "src/a.go:12\n",
+		},
+		{
+			name:   "read file not indexed",
+			cwd:    cwd,
+			tool:   "ReadFile",
+			input:  `{"path":"internal/a.go"}`,
+			output: "package internal\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				runKimi(kimiPostToolPayload(tt.cwd, tt.tool, tt.input, tt.output), port)
 			})
 			if out != "" {
 				t.Fatalf("expected silent no-op, got %q", out)
@@ -157,7 +278,7 @@ func TestRunKimiNoopShapes(t *testing.T) {
 		kimiPromptPayload(cwd, "/clear"),
 	}
 	for _, tc := range cases {
-		out := captureStdout(t, func() { runKimi(tc) })
+		out := captureStdout(t, func() { runKimi(tc, 0) })
 		if out != "" {
 			t.Fatalf("expected no output for %s, got %q", tc, out)
 		}
@@ -175,7 +296,7 @@ func TestRunKimiNoopOutsideGortexProject(t *testing.T) {
 	defer restore()
 
 	out := captureStdout(t, func() {
-		runKimi(kimiPromptPayload(t.TempDir(), "fix auth token validation"))
+		runKimi(kimiPromptPayload(t.TempDir(), "fix auth token validation"), 0)
 	})
 	if out != "" {
 		t.Fatalf("expected no output outside a Gortex-enabled project, got %q", out)
@@ -210,6 +331,19 @@ func kimiPromptPayload(cwd, prompt string) []byte {
 
 func kimiPreToolPayload(cwd, toolName, input string) []byte {
 	return []byte(`{"hook_event_name":"PreToolUse","cwd":` + strconv.Quote(cwd) + `,"tool_name":` + strconv.Quote(toolName) + `,"tool_input":` + input + `}`)
+}
+
+func kimiPostToolPayload(cwd, toolName, input, output string) []byte {
+	return []byte(`{"hook_event_name":"PostToolUse","cwd":` + strconv.Quote(cwd) + `,"tool_name":` + strconv.Quote(toolName) + `,"tool_input":` + input + `,"tool_output":` + strconv.Quote(output) + `}`)
+}
+
+func assertKimiPlainStdout(t *testing.T, out string) {
+	t.Helper()
+	for _, notWant := range []string{"hookSpecificOutput", "additionalContext", "permissionDecision"} {
+		if strings.Contains(out, notWant) {
+			t.Fatalf("Kimi dispatcher should emit plain stdout, got JSON-shaped output:\n%s", out)
+		}
+	}
 }
 
 func writeGortexProjectMarker(t *testing.T, dir string) string {

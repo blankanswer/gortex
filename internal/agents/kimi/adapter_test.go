@@ -51,11 +51,12 @@ func TestKimiGlobalWritesMCPAndHooks(t *testing.T) {
 	}
 
 	hooks := readKimiHooks(t, env)
-	if len(hooks) != 2 {
-		t.Fatalf("hooks=%#v want 2", hooks)
+	if len(hooks) != 3 {
+		t.Fatalf("hooks=%#v want 3", hooks)
 	}
 	assertKimiHook(t, hooks[0], "UserPromptSubmit")
 	assertKimiHook(t, hooks[1], "PreToolUse")
+	assertKimiHook(t, hooks[2], "PostToolUse")
 
 	agentstest.AssertIdempotent(t, a, env)
 }
@@ -107,7 +108,7 @@ timeout = 5
 		t.Fatalf("default_model was not preserved: %#v", cfg)
 	}
 	hooks := readKimiHooks(t, env)
-	if len(hooks) != 3 {
+	if len(hooks) != 4 {
 		t.Fatalf("hooks=%#v want user+gortex hooks", hooks)
 	}
 	if hooks[0]["event"] != "Notification" {
@@ -118,6 +119,9 @@ timeout = 5
 	}
 	if hooks[2]["event"] != "PreToolUse" {
 		t.Fatalf("missing gortex PreToolUse hook: %#v", hooks)
+	}
+	if hooks[3]["event"] != "PostToolUse" {
+		t.Fatalf("missing gortex PostToolUse hook: %#v", hooks)
 	}
 }
 
@@ -141,6 +145,12 @@ timeout = 30
 event = "PreToolUse"
 command = "/tmp/old-gortex hook --agent=kimi"
 timeout = 30
+
+[[hooks]]
+event = "PostToolUse"
+matcher = "ReadFile|Grep|Glob"
+command = "/tmp/old-gortex hook --agent=kimi"
+timeout = 30
 `
 	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
 		t.Fatal(err)
@@ -150,7 +160,7 @@ timeout = 30
 		t.Fatalf("apply force: %v", err)
 	}
 	hooks := readKimiHooks(t, env)
-	if len(hooks) != 3 {
+	if len(hooks) != 4 {
 		t.Fatalf("hooks=%#v want user+current gortex hooks", hooks)
 	}
 	if hooks[0]["command"] != "echo user" {
@@ -158,6 +168,7 @@ timeout = 30
 	}
 	assertKimiHook(t, hooks[1], "UserPromptSubmit")
 	assertKimiHook(t, hooks[2], "PreToolUse")
+	assertKimiHook(t, hooks[3], "PostToolUse")
 }
 
 func kimiTestEnv(t *testing.T) agents.Env {
@@ -216,7 +227,14 @@ func assertKimiHook(t *testing.T, hook map[string]any, event string) {
 	if hook["timeout"] != int64(kimiHookTimeoutSeconds) {
 		t.Errorf("timeout=%v want %d", hook["timeout"], kimiHookTimeoutSeconds)
 	}
-	if _, ok := hook["matcher"]; ok {
+	matcher, hasMatcher := hook["matcher"]
+	if event == "PostToolUse" {
+		if matcher != "ReadFile|Grep|Glob" {
+			t.Errorf("PostToolUse matcher=%v want ReadFile|Grep|Glob", matcher)
+		}
+		return
+	}
+	if hasMatcher {
 		t.Errorf("%s hook should not write matcher: %#v", event, hook)
 	}
 }

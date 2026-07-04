@@ -12,27 +12,31 @@ import (
 // RunKimi handles the Kimi Code CLI hook wire shape. Kimi consumes plain
 // stdout as hook-added context, so this dispatcher intentionally avoids
 // Claude-style structured additionalContext JSON.
-func RunKimi() {
+func RunKimi(port int) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return
 	}
-	runKimi(data)
+	runKimi(data, port)
 }
 
-func runKimi(data []byte) {
-	var input struct {
-		HookEventName string         `json:"hook_event_name"`
-		CWD           string         `json:"cwd"`
-		ToolName      string         `json:"tool_name"`
-		ToolInput     map[string]any `json:"tool_input"`
-		Prompt        any            `json:"prompt"`
-	}
+type kimiHookInput struct {
+	HookEventName string         `json:"hook_event_name"`
+	CWD           string         `json:"cwd"`
+	ToolName      string         `json:"tool_name"`
+	ToolInput     map[string]any `json:"tool_input"`
+	ToolOutput    any            `json:"tool_output"`
+	ToolResponse  any            `json:"tool_response"`
+	Prompt        any            `json:"prompt"`
+}
+
+func runKimi(data []byte, port int) {
+	var input kimiHookInput
 	if err := json.Unmarshal(data, &input); err != nil {
 		return
 	}
 	switch input.HookEventName {
-	case "UserPromptSubmit", "PreToolUse":
+	case "UserPromptSubmit", "PreToolUse", "PostToolUse":
 	default:
 		return
 	}
@@ -48,6 +52,8 @@ func runKimi(data []byte) {
 		fmt.Print(ctx)
 	case "PreToolUse":
 		runKimiPreToolUse(input.ToolName, input.ToolInput)
+	case "PostToolUse":
+		runKimiPostToolUse(input, port)
 	}
 }
 
@@ -69,6 +75,68 @@ func kimiGortexReadPreToolUseTool(toolName string) bool {
 	default:
 		return false
 	}
+}
+
+func runKimiPostToolUse(input kimiHookInput, port int) {
+	ctx := kimiPostToolUseContext(input, port)
+	if ctx == "" {
+		return
+	}
+	fmt.Print(ctx)
+}
+
+func kimiPostToolUseContext(input kimiHookInput, port int) string {
+	normalized := postHookInput{
+		HookEventName: "PostToolUse",
+		ToolInput:     input.ToolInput,
+		ToolResponse:  kimiToolOutput(input),
+		CWD:           input.CWD,
+	}
+
+	switch input.ToolName {
+	case "ReadFile":
+		normalized.ToolName = "Read"
+		normalized.ToolInput = kimiReadFileInput(input.ToolInput)
+		return postRead(normalized, port)
+	case "Glob":
+		normalized.ToolName = "Glob"
+		return postGlob(normalized, port)
+	case "Grep":
+		mode, _ := input.ToolInput["output_mode"].(string)
+		switch strings.TrimSpace(mode) {
+		case "", "files_with_matches":
+			normalized.ToolName = "Glob"
+			return postGlob(normalized, port)
+		case "content":
+			normalized.ToolName = "Grep"
+			return postGrep(normalized, port)
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+func kimiToolOutput(input kimiHookInput) any {
+	if input.ToolOutput != nil {
+		return input.ToolOutput
+	}
+	return input.ToolResponse
+}
+
+func kimiReadFileInput(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+1)
+	for k, v := range in {
+		out[k] = v
+	}
+	if _, ok := out["file_path"].(string); ok {
+		return out
+	}
+	if p, ok := in["path"].(string); ok && p != "" {
+		out["file_path"] = p
+	}
+	return out
 }
 
 func kimiPromptText(v any) string {

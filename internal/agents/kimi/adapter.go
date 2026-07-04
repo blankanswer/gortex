@@ -8,8 +8,8 @@
 //
 // Kimi's hooks are user-level today, so project-mode `gortex init` only writes
 // the repo-local MCP file. Machine-wide `gortex install` writes user MCP and,
-// when hooks are enabled, UserPromptSubmit and PreToolUse hooks that shell
-// `gortex hook --agent=kimi`.
+// when hooks are enabled, UserPromptSubmit, PreToolUse, and PostToolUse hooks
+// that shell `gortex hook --agent=kimi`.
 //
 // Docs: https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html
 package kimi
@@ -164,7 +164,7 @@ func upsertKimiHooks(root map[string]any, env agents.Env, opts agents.ApplyOpts)
 	}
 
 	found := make(map[string]bool)
-	kept := make([]any, 0, len(existing)+2)
+	kept := make([]any, 0, len(existing)+3)
 	for _, entry := range existing {
 		if event, ok := kimiHookEntryInvokesKimi(entry); ok {
 			found[event] = true
@@ -214,6 +214,7 @@ func kimiHooks(env agents.Env) []map[string]any {
 	return []map[string]any{
 		kimiUserPromptSubmitHook(env),
 		kimiPreToolUseHook(env),
+		kimiPostToolUseHook(env),
 	}
 }
 
@@ -236,6 +237,15 @@ func kimiPreToolUseHook(env agents.Env) map[string]any {
 	}
 }
 
+func kimiPostToolUseHook(env agents.Env) map[string]any {
+	return map[string]any{
+		"event":   "PostToolUse",
+		"matcher": "ReadFile|Grep|Glob",
+		"command": kimiHookCommand(env),
+		"timeout": kimiHookTimeoutSeconds,
+	}
+}
+
 func kimiHookCommand(env agents.Env) string {
 	base := strings.TrimSpace(env.HookCommand)
 	if base == "" {
@@ -251,7 +261,7 @@ func kimiHookEntryInvokesKimi(entry any) (string, bool) {
 	}
 	event, _ := m["event"].(string)
 	switch event {
-	case "UserPromptSubmit", "PreToolUse":
+	case "UserPromptSubmit", "PreToolUse", "PostToolUse":
 	default:
 		return "", false
 	}
